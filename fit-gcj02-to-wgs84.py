@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-"""Restore WGS84 coordinates in FIT files edited by Garmin Connect China.
+"""把 Garmin Connect 中国区编辑过的 FIT 文件中的坐标从 GCJ-02 还原为 WGS84。
 
-Garmin's China-region Connect silently converts route coordinates from WGS84
-to GCJ-02 ("Mars coordinate system") whenever a course is edited and saved.
-The watch's OSM map uses WGS84, so edited courses appear offset by ~270m.
+Garmin 中国区的 Connect 在编辑并保存路线时（哪怕只是改个名字），会静默地
+把坐标从 WGS84 转成 GCJ-02（"火星坐标系"）。手表的 OSM 地图用的是 WGS84，
+所以编辑后同步过去的路线在地图上整体偏移约 270 米。
 
-This tool reverses that conversion: input a Connect-edited FIT, output a new
-FIT with all coordinate fields restored to WGS84. All non-coordinate bytes
-(timestamps, altitude, names, distances, types, custom Garmin fields, etc.)
-are preserved byte-for-byte.
+本工具反向：输入一个被 Connect 编辑过的 FIT，输出一个新 FIT，所有坐标字段
+还原为 WGS84。其他所有字节（时间戳、海拔、路点名字、距离、类型，包括
+Garmin 写的私有字段）逐字节保留。
 
-Implementation: parses the FIT binary structure directly per the Garmin FIT
-SDK spec. Walks records tracking definitions, locates position_lat/long
-fields by global_message_num + field_definition_num, modifies semicircle
-integers in place, recomputes the file CRC. Does not depend on any FIT
-library — avoids loss of Garmin custom fields that high-level libraries
-silently strip.
+实现思路：直接按 Garmin FIT SDK 规范解析二进制结构。遍历记录、跟踪定义，
+按 global_message_num + field_definition_num 定位坐标字段，原地修改
+semicircle 整数，最后重算文件 CRC。不依赖任何 FIT 库——这样能避免高层库
+在不认识 Garmin 私有字段时静默丢弃它们。
 
-LIMITATION: cannot auto-detect input coordinate system. Only run on files
-known to come from Connect China after editing. See README for details.
+限制：无法自动判断输入坐标系。只对确认是从 Connect 中国区编辑后导出的
+FIT 文件使用。详见 README.md。
 """
 import argparse
 import math
@@ -27,7 +24,7 @@ import struct
 import sys
 
 
-# ----- Standard WGS84 ↔ GCJ-02 algorithm (public reference impl) -----
+# ----- 标准 WGS84 ↔ GCJ-02 算法（公开参考实现） -----
 
 def _out_of_china(lat, lon):
     if lon < 72.004 or lon > 137.8347:
@@ -70,7 +67,7 @@ def wgs84_to_gcj02(lat, lon):
 
 
 def gcj02_to_wgs84(gcj_lat, gcj_lon, max_iter=5):
-    """Iterative inverse of wgs84_to_gcj02. Converges to <1e-9 deg in ~5 iters."""
+    """wgs84_to_gcj02 的迭代反函数。5 次迭代后误差 < 1e-9 度。"""
     if _out_of_china(gcj_lat, gcj_lon):
         return gcj_lat, gcj_lon
     lat, lon = gcj_lat, gcj_lon
@@ -81,7 +78,7 @@ def gcj02_to_wgs84(gcj_lat, gcj_lon, max_iter=5):
     return lat, lon
 
 
-# ----- FIT CRC (Garmin's 16-bit polynomial, per FIT SDK) -----
+# ----- FIT CRC（Garmin 16-bit 多项式，参见 FIT SDK） -----
 
 _CRC_TABLE = (
     0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401,
@@ -101,27 +98,27 @@ def fit_crc(data):
     return crc & 0xFFFF
 
 
-# ----- FIT byte-level converter -----
+# ----- FIT 字节级转换器 -----
 
-# Map of (global_msg_num) -> dict of {field_def_num: 'lat' or 'lon'}
-# Pairs are inferred by ordering: each consecutive (lat, lon) in sorted order forms one pair.
+# 映射：(global_msg_num) -> {field_def_num: 'lat' 或 'lon'}
+# 经度纬度成对的逻辑：按 field_def_num 升序排列，每相邻两个 (lat, lon) 算一对。
 COORD_FIELDS = {
-    20: {0: "lat", 1: "lon"},                          # record
-    32: {2: "lat", 3: "lon"},                          # course_point
-    19: {3: "lat", 4: "lon", 5: "lat", 6: "lon"},      # lap: start, end
+    20: {0: "lat", 1: "lon"},                          # record（轨迹点）
+    32: {2: "lat", 3: "lon"},                          # course_point（路点）
+    19: {3: "lat", 4: "lon", 5: "lat", 6: "lon"},      # lap（圈：start, end）
 }
 
 SEMICIRCLE_TO_DEG = 180.0 / (2 ** 31)
 DEG_TO_SEMICIRCLE = (2 ** 31) / 180.0
-INVALID_SINT32 = 0x7FFFFFFF  # FIT "field not present" sentinel for sint32
+INVALID_SINT32 = 0x7FFFFFFF  # FIT 协议中 sint32 的"字段缺失"哨兵值
 
 
 def _convert_pair_in_place(buf, start, lat_off, lon_off, endian, verbose, label):
-    """Convert one (lat, lon) pair within a data record, in place."""
+    """在数据记录的指定字节偏移处，把一对 (lat, lon) 原地转换。"""
     lat_semi = struct.unpack_from(endian + "i", buf, start + lat_off)[0]
     lon_semi = struct.unpack_from(endian + "i", buf, start + lon_off)[0]
     if lat_semi == INVALID_SINT32 or lon_semi == INVALID_SINT32:
-        return False  # field absent
+        return False  # 字段缺失
     lat_deg = lat_semi * SEMICIRCLE_TO_DEG
     lon_deg = lon_semi * SEMICIRCLE_TO_DEG
     new_lat, new_lon = gcj02_to_wgs84(lat_deg, lon_deg)
@@ -135,16 +132,16 @@ def _convert_pair_in_place(buf, start, lat_off, lon_off, endian, verbose, label)
 
 
 def _convert_data_record(buf, start, fields, arch, coord_map, verbose, label):
-    """Walk a data record's fields, converting any position pairs found."""
+    """遍历一条数据记录的字段，对其中所有坐标对执行转换。"""
     endian = "<" if arch == 0 else ">"
-    field_offsets = {}  # field_def_num -> (byte_offset, size)
+    field_offsets = {}  # field_def_num -> (字节偏移, 大小)
     offset = 0
     for fdn, size, _base_type in fields:
         if fdn in coord_map:
             field_offsets[fdn] = (offset, size)
         offset += size
 
-    # Pair up lat/lon fields by sorted field_def_num order
+    # 按 field_def_num 升序两两配对（lat 在前、lon 在后）
     converted = 0
     sorted_keys = sorted(coord_map.keys())
     for i in range(0, len(sorted_keys), 2):
@@ -165,20 +162,20 @@ def _convert_data_record(buf, start, fields, arch, coord_map, verbose, label):
 
 
 def convert_fit_bytes(data, verbose=False):
-    """Byte-level conversion. Returns (new_bytes, counts_dict)."""
+    """字节级转换。返回 (新的字节串, 计数字典)。"""
     if data[8:12] != b".FIT":
-        raise ValueError("Not a FIT file (missing .FIT magic bytes)")
+        raise ValueError("不是 FIT 文件（缺少 .FIT 标识）")
 
     header_size = data[0]
     if header_size not in (12, 14):
-        raise ValueError(f"Unexpected FIT header size: {header_size}")
+        raise ValueError(f"FIT 文件头大小异常：{header_size}")
 
     data_size = struct.unpack_from("<I", data, 4)[0]
     body_start = header_size
-    body_end = body_start + data_size  # bytes [body_end:body_end+2] are file CRC
+    body_end = body_start + data_size  # [body_end : body_end+2] 是文件 CRC
 
     if len(data) < body_end + 2:
-        raise ValueError("FIT file truncated")
+        raise ValueError("FIT 文件被截断")
 
     out = bytearray(data)
     definitions = {}  # local_msg_type -> (global_num, arch, fields_list)
@@ -189,10 +186,10 @@ def convert_fit_bytes(data, verbose=False):
         header = out[pos]
         pos += 1
         if header & 0x80:
-            # Compressed Timestamp Header — refers to a previously defined local_msg_type
+            # 压缩时间戳头：复用先前定义过的 local_msg_type
             local_mt = (header >> 5) & 0x3
             if local_mt not in definitions:
-                raise ValueError(f"Compressed header references undefined local_msg_type {local_mt}")
+                raise ValueError(f"压缩头引用了未定义的 local_msg_type {local_mt}")
             global_num, arch, fields = definitions[local_mt]
             record_size = sum(f[1] for f in fields)
             if global_num in COORD_FIELDS:
@@ -210,7 +207,7 @@ def convert_fit_bytes(data, verbose=False):
             is_def = bool(header & 0x40)
             has_dev = bool(header & 0x20)
             if is_def:
-                # Definition message
+                # 定义记录
                 pos += 1  # reserved
                 arch = out[pos]; pos += 1
                 endian = "<" if arch == 0 else ">"
@@ -224,18 +221,18 @@ def convert_fit_bytes(data, verbose=False):
                 if has_dev:
                     num_dev = out[pos]; pos += 1
                     for _ in range(num_dev):
-                        # Each developer field def is also 3 bytes; we only need its size
-                        # to walk past it in data records.
+                        # 开发者字段定义也是 3 字节，我们只关心其大小，
+                        # 用来正确跳过数据记录里这部分字节。
                         dev_size = out[pos + 1]
-                        # Append as a synthetic field; field_def_num=-1 ensures no match.
+                        # field_def_num 取 -1 确保跟坐标 map 不会撞上
                         fields.append((-1, dev_size, 0))
                         pos += 3
                 definitions[local_mt] = (global_num, arch, fields)
                 counts["definitions"] += 1
             else:
-                # Data message
+                # 数据记录
                 if local_mt not in definitions:
-                    raise ValueError(f"Data message references undefined local_msg_type {local_mt}")
+                    raise ValueError(f"数据记录引用了未定义的 local_msg_type {local_mt}")
                 global_num, arch, fields = definitions[local_mt]
                 record_size = sum(f[1] for f in fields)
                 if global_num in COORD_FIELDS:
@@ -250,9 +247,9 @@ def convert_fit_bytes(data, verbose=False):
                 pos += record_size
 
     if pos != body_end:
-        raise ValueError(f"Body parse ended at {pos}, expected {body_end}")
+        raise ValueError(f"文件体解析在 {pos} 结束，但应当在 {body_end}")
 
-    # Recompute file CRC over header + body, write into trailing 2 bytes
+    # 在 [header + body] 上重算 CRC，写回末尾两字节
     new_crc = fit_crc(bytes(out[:body_end]))
     struct.pack_into("<H", out, body_end, new_crc)
 
@@ -268,22 +265,22 @@ def convert_fit(input_path, output_path, verbose=False):
     return counts
 
 
-# ----- CLI -----
+# ----- 命令行接口 -----
 
 def parse_args():
     p = argparse.ArgumentParser(
         prog="fit-gcj02-to-wgs84",
-        description="Restore WGS84 coordinates in FIT files edited by Garmin Connect China.",
+        description="把 Garmin Connect 中国区编辑过的 FIT 文件中的坐标从 GCJ-02 还原为 WGS84。",
     )
-    p.add_argument("input_file", help="Path to .fit file edited by Connect (China region)")
-    p.add_argument("-o", "--output", help="Output path (default: INPUT.wgs84.fit, same dir)")
+    p.add_argument("input_file", help="被 Connect 中国区编辑过的 .fit 文件路径")
+    p.add_argument("-o", "--output", help="输出路径（默认：INPUT.wgs84.fit，同目录）")
     p.add_argument(
         "-f", "--force", action="store_true",
-        help="Allow processing files already named *.wgs84.fit",
+        help="允许处理已含 .wgs84.fit 后缀的文件（绕过幂等保护）",
     )
     p.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Print every coordinate transformation",
+        help="打印每一对坐标的转换详情",
     )
     return p.parse_args()
 
@@ -292,16 +289,16 @@ def main():
     args = parse_args()
 
     if not os.path.isfile(args.input_file):
-        print(f"✗ Input file not found: {args.input_file}", file=sys.stderr)
+        print(f"✗ 找不到输入文件：{args.input_file}", file=sys.stderr)
         sys.exit(1)
 
     if args.input_file.lower().endswith(".wgs84.fit") and not args.force:
         print(
-            "✗ Input filename ends with .wgs84.fit — refusing to convert "
-            "(would corrupt valid WGS84 data).",
+            "✗ 输入文件名以 .wgs84.fit 结尾——拒绝转换"
+            "（避免破坏已经是 WGS84 的数据）。",
             file=sys.stderr,
         )
-        print("  If you really mean to convert this file again, pass --force.", file=sys.stderr)
+        print("  如果确实要再转一次，请加 --force 参数。", file=sys.stderr)
         sys.exit(1)
 
     if args.output:
@@ -314,11 +311,11 @@ def main():
 
     total = counts["record"] + counts["course_point"] + counts["lap"]
     print(
-        f"✓ Read FIT: {counts['record']} trackpoints, "
-        f"{counts['course_point']} course points, {counts['lap']} lap position(s)"
+        f"✓ 读取 FIT：{counts['record']} 个轨迹点，"
+        f"{counts['course_point']} 个路点，{counts['lap']} 处 Lap 坐标"
     )
-    print(f"✓ Converted {total} coordinate pairs (GCJ-02 → WGS84)")
-    print(f"✓ Written: {output_path}")
+    print(f"✓ 已转换 {total} 对坐标（GCJ-02 → WGS84）")
+    print(f"✓ 已写入：{output_path}")
 
 
 if __name__ == "__main__":

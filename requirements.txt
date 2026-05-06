@@ -1,4 +1,4 @@
-# Runtime: stdlib only — no dependencies.
-# Test-time: fit_tool is used by tests/test_roundtrip.py to parse output back
-#            and confirm the file remains valid FIT after conversion.
+# 运行时：仅使用标准库，无需任何依赖。
+# 测试时：fit_tool 用于 tests/test_roundtrip.py 把转换后的输出再读回来，
+#         确认转换后的 FIT 文件结构依然合法。
 fit_tool

@@ -1,14 +1,13 @@
-"""Regression tests for fit-gcj02-to-wgs84.
+"""fit-gcj02-to-wgs84 的回归测试。
 
-Uses real test data:
-- ~/Downloads/夏羌拉.gpx — original WGS84 from 两步路 iOS app
-- ~/Downloads/夏羌拉.fit — same route after Connect China edit (GCJ-02)
+使用真实数据 fixture：
+- ~/Downloads/夏羌拉.gpx —— 来自两步路 iOS app 的原始 WGS84 GPX
+- ~/Downloads/夏羌拉.fit —— 同一条路线在 Connect 中国区编辑后的 GCJ-02 FIT
 
-The forward case asserts: converting the FIT (GCJ-02) → WGS84 produces
-trackpoints matching the original GPX (WGS84) within ~1cm (FIT semicircle
-encoding precision floor).
+正向用例断言：把 FIT（GCJ-02）转换为 WGS84 后，轨迹点跟原始 GPX
+（WGS84）的距离 ~1cm（FIT semicircle 编码精度地板）。
 
-These tests will be skipped if the test data files are not present.
+如果测试 fixture 文件不存在，相关用例会自动跳过。
 """
 import math
 import os
@@ -26,11 +25,12 @@ FIT_FIXTURE = os.path.expanduser("~/Downloads/夏羌拉.fit")
 
 requires_fixtures = pytest.mark.skipif(
     not (os.path.isfile(GPX_FIXTURE) and os.path.isfile(FIT_FIXTURE)),
-    reason="Test fixtures 夏羌拉.gpx/fit not in ~/Downloads/",
+    reason="测试 fixture 夏羌拉.gpx/fit 不在 ~/Downloads/ 下",
 )
 
 
 def haversine_m(lat1, lon1, lat2, lon2):
+    """两个经纬度之间的球面距离，单位：米。"""
     R = 6371000.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp = math.radians(lat2 - lat1)
@@ -61,30 +61,33 @@ def read_fit_trackpoints(path):
 
 
 def run_cli(*args, expect_exit=0):
-    """Run the CLI script and return (stdout, stderr)."""
+    """运行 CLI 脚本，返回 (stdout, stderr)。"""
     result = subprocess.run(
         [sys.executable, SCRIPT, *args],
         capture_output=True,
         text=True,
     )
     assert result.returncode == expect_exit, (
-        f"Expected exit {expect_exit}, got {result.returncode}.\n"
+        f"期望 exit={expect_exit}，实际={result.returncode}。\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     return result.stdout, result.stderr
 
 
-# ----- Algorithm-only tests (no fixtures needed) -----
-
-def test_inverse_roundtrip_in_china():
-    """Forward + inverse should return original to <1e-9 deg precision."""
-    sys.path.insert(0, REPO_ROOT)
-    # Hyphenated module name needs importlib
+def _load_module():
+    """以模块形式加载主脚本（文件名带连字符，要走 importlib 这条路）。"""
     import importlib.util
     spec = importlib.util.spec_from_file_location("fit_gcj02_to_wgs84", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
 
+
+# ----- 算法层用例（不需要 fixture 文件） -----
+
+def test_inverse_roundtrip_in_china():
+    """正向 + 反向应在 1e-9 度内还原原值。"""
+    mod = _load_module()
     test_points = [
         (31.068186, 101.340325),  # 四川甘孜
         (39.908857, 116.397458),  # 北京天安门
@@ -99,38 +102,34 @@ def test_inverse_roundtrip_in_china():
 
 
 def test_out_of_china_unchanged():
-    sys.path.insert(0, REPO_ROOT)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("fit_gcj02_to_wgs84", SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    # Tokyo, NYC, London — outside China bounds, must pass through unchanged
+    """境外坐标必须原样返回（GCJ-02 仅在中国大陆有定义）。"""
+    mod = _load_module()
+    # 东京、纽约、伦敦
     for lat, lon in [(35.6895, 139.6917), (40.7128, -74.0060), (51.5074, -0.1278)]:
         assert mod.wgs84_to_gcj02(lat, lon) == (lat, lon)
         assert mod.gcj02_to_wgs84(lat, lon) == (lat, lon)
 
 
-# ----- End-to-end CLI tests (require fixtures) -----
+# ----- 端到端 CLI 用例（依赖 fixture） -----
 
 @requires_fixtures
 def test_e2e_forward_conversion(tmp_path):
-    """Convert 夏羌拉.fit (GCJ-02) and confirm output matches 夏羌拉.gpx (WGS84)."""
+    """转换 夏羌拉.fit（GCJ-02），断言输出跟 夏羌拉.gpx（WGS84）逐点对齐。"""
     output = tmp_path / "out.wgs84.fit"
     stdout, _ = run_cli(FIT_FIXTURE, "-o", str(output))
 
-    assert output.exists(), "Output file not created"
+    assert output.exists(), "输出文件没有生成"
     assert output.stat().st_size == os.path.getsize(FIT_FIXTURE), (
-        "Output size should equal input size (in-place byte-level conversion)"
+        "输出文件大小应当等于输入大小（字节级原地转换）"
     )
-    assert "Converted" in stdout
+    assert "已转换" in stdout
 
     gpx_pts = read_gpx_trackpoints(GPX_FIXTURE)
     fit_pts = read_fit_trackpoints(str(output))
-    assert len(fit_pts) > 1000, "Sanity: should have many trackpoints"
+    assert len(fit_pts) > 1000, "Sanity 检查：轨迹点数应当很多"
 
-    # For each FIT trackpoint, find nearest GPX trackpoint. Average distance
-    # should be near the FIT semicircle precision floor (~1cm).
+    # 对每个 FIT 轨迹点，在 GPX 中找最近邻。平均距离应当在
+    # FIT semicircle 编码精度地板（~1cm）附近。
     sample_n = min(50, len(fit_pts))
     distances = []
     for i in range(sample_n):
@@ -138,25 +137,24 @@ def test_e2e_forward_conversion(tmp_path):
         d = min(haversine_m(flat, flon, glat, glon) for glat, glon in gpx_pts)
         distances.append(d)
     avg = sum(distances) / len(distances)
-    assert avg < 0.05, f"Average residual {avg:.4f}m exceeds 5cm threshold"
+    assert avg < 0.05, f"平均残差 {avg:.4f}m 超过 5cm 阈值"
 
 
 @requires_fixtures
 def test_e2e_refuses_wgs84_named_input(tmp_path):
-    """Filename ending in .wgs84.fit should be refused without --force."""
-    # Make a copy with the dangerous name
+    """输入文件名以 .wgs84.fit 结尾时应当拒绝（除非 --force）。"""
     import shutil
     bad_input = tmp_path / "already.wgs84.fit"
     shutil.copy(FIT_FIXTURE, bad_input)
 
     _, stderr = run_cli(str(bad_input), expect_exit=1)
-    assert "refusing" in stderr.lower()
+    assert "拒绝" in stderr
     assert "--force" in stderr
 
 
 @requires_fixtures
 def test_e2e_force_overrides_refusal(tmp_path):
-    """With --force, processing a .wgs84.fit-named input proceeds."""
+    """加 --force 参数时，对 .wgs84.fit 命名的输入也能正常转换。"""
     import shutil
     bad_input = tmp_path / "already.wgs84.fit"
     shutil.copy(FIT_FIXTURE, bad_input)
@@ -164,4 +162,4 @@ def test_e2e_force_overrides_refusal(tmp_path):
 
     stdout, _ = run_cli(str(bad_input), "-o", str(output), "--force")
     assert output.exists()
-    assert "Converted" in stdout
+    assert "已转换" in stdout

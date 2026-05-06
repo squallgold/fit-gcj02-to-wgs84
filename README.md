@@ -1,80 +1,89 @@
 # fit-gcj02-to-wgs84
 
-Restore WGS84 coordinates in FIT files edited by Garmin Connect China.
+把 Garmin Connect 中国区编辑过的 FIT 文件中的坐标从 GCJ-02 还原为 WGS84。
 
-## The problem
+## 问题背景
 
-Garmin's China-region Connect (and likely Explore) silently converts route coordinates from **WGS84** to **GCJ-02** (the "Mars coordinate system") whenever a course is **edited and saved** — even just renaming a waypoint triggers the conversion. Direct sync from a GPX import without editing preserves WGS84.
+Garmin 中国区的 Connect（Explore 应该也一样）在你**编辑并保存**任何路线时，会静默地把坐标从 **WGS84** 转成 **GCJ-02**（俗称"火星坐标系"）——哪怕只是改一个路点名字也会触发。如果只是把 GPX 直接同步给手表、不做编辑，坐标会保持 WGS84。
 
-If your watch displays maps in WGS84 (e.g. OSM via the OSM Maps app on Garmin Enduro / Fenix / Forerunner), edited courses appear **offset by ~270 meters** from their true location. This makes Connect China's otherwise nice GUI editing unsafe for any user who relies on accurate map display.
+如果你的手表用 WGS84 地图（比如 Garmin Enduro / Fenix / Forerunner 上的 OSM Maps 应用），编辑过的路线在地图上会**整体偏移约 270 米**。本来想用 Connect 的图形界面编辑路线（删点、改名、改类型等），结果被坐标系问题堵死。
 
-## What this tool does
+## 这个工具做什么
 
-Takes a FIT file edited by Connect China (containing GCJ-02 coordinates) and produces a new FIT file with all coordinate fields restored to WGS84. **Everything else is preserved byte-for-byte** — timestamps, altitude, course-point names (including non-ASCII like Chinese), distances, lap stats, and even Garmin's private fields are untouched.
+把一个被 Connect 中国区编辑过的 FIT 文件（含 GCJ-02 坐标）转换成新的 FIT 文件，所有坐标字段还原为 WGS84。**其他所有内容逐字节保留**——时间戳、海拔、路点名字（包括中文）、距离、Lap 统计，连 Garmin 的私有字段都不动。
 
-## Usage
+## 用法
 
 ```bash
-# Convert in place (writes 夏羌拉.wgs84.fit alongside the input)
+# 转换并输出到同目录（生成 夏羌拉.wgs84.fit）
 python3 fit-gcj02-to-wgs84.py 夏羌拉.fit
 
-# Custom output path
+# 自定义输出路径
 python3 fit-gcj02-to-wgs84.py 夏羌拉.fit -o /tmp/output.fit
 
-# See every coordinate transformation
+# 打印每一对坐标的转换前后值
 python3 fit-gcj02-to-wgs84.py 夏羌拉.fit -v
 ```
 
-Then copy the resulting `*.wgs84.fit` to your watch's `\Garmin\NewFiles\` folder via USB.
+转换好的 `*.wgs84.fit` 拷到手表 `/GARMIN/Courses/` 目录里，开机后从课程列表加载即可。
 
-## Requirements
+## macOS 用户：跟手表传输文件
 
-Python 3.8+. The runtime conversion uses **stdlib only** — no FIT library needed; the tool parses the FIT binary structure directly. The `fit_tool` package is only required for running the test suite.
+macOS 不会把 Garmin 手表识别为 Finder 可见的存储卷（Garmin 走 MTP 协议，不是 USB Mass Storage）。需要装一个 GUI 工具来读写手表里的文件：
 
-## Limitations
+- **Android File Transfer**（Google 官方）——https://www.android.com/filetransfer/
+- **OpenMTP**（开源，新版 macOS 上往往更稳）——https://openmtp.ganeshrvel.com/
 
-### ⚠️ Cannot auto-detect input coordinate system
+打开任意一个，连接手表后导航到 `/GARMIN/Courses/`，把转换后的 `.wgs84.fit` 拖进去。
 
-This tool will **happily convert any FIT file you give it** — including a perfectly valid WGS84 file — because the FIT format does not record which coordinate system its values use, and Connect China leaves no metadata to distinguish edited from unedited files.
+## 环境要求
 
-**Only use this tool on FIT files known to come from Connect China after editing.** If you sync a GPX directly to your watch via Connect (no edit), the resulting FIT is already WGS84 and must NOT be passed through this tool — doing so would shift it ~270m the wrong direction.
+Python 3.8+。运行时**只用标准库**——不依赖任何 FIT 解析库；工具直接按 FIT 二进制规范解析文件。仅在跑测试时需要 `fit_tool` 包。
 
-To prevent accidental double-conversion, the tool refuses to process any input file whose name ends in `.wgs84.fit` (override with `--force` if you really know what you're doing).
+## 已知限制
 
-### Geographic scope
+### ⚠️ 无法自动判断输入坐标系
 
-GCJ-02 is only defined inside mainland China (roughly: longitude 72.0–137.8°, latitude 0.8–55.8°). Coordinates outside this region are left untouched, matching the GCJ-02 spec.
+工具会**对你给的任何 FIT 文件都执行转换**——包括本来就是 WGS84 的文件——因为 FIT 格式没有记录坐标系信息，Connect 中国区也不会留下任何"已转换"的标记来区分。
 
-## How it works (technical)
+**只对从 Connect 中国区编辑后导出的 FIT 用本工具**。如果是 GPX 直接同步给手表（不编辑）后导出的 FIT，那已经是 WGS84，**不要**再喂给本工具——会反向偏移 270m。
 
-The FIT binary format stores coordinates as 32-bit signed integers in "semicircles" (1 semicircle = 180/2³¹ degrees) within data records, whose layout is described by preceding definition records. This tool:
+为了防止误用，工具会拒绝处理文件名以 `.wgs84.fit` 结尾的输入（除非加 `--force` 参数）。
 
-1. Walks the FIT byte stream tracking definition records by `local_message_type`
-2. Locates data records whose definition has `global_message_num` of `record` (20), `course_point` (32), or `lap` (19)
-3. Within those, finds `position_lat`/`position_long` fields by `field_definition_num`
-4. Reads the semicircles → degrees, applies an iterative GCJ-02→WGS84 inverse, writes degrees → semicircles back into the same byte positions
-5. Recomputes the file CRC over the modified body
+### 适用地理范围
 
-The GCJ-02 forward transform has no closed-form inverse, so the tool uses an iterative fixed-point method that converges to <1e-9 degree (well below the FIT semicircle precision floor of ~1e-7 degree) in 5 iterations.
+GCJ-02 仅在中国大陆有定义（大致：经度 72.0–137.8°，纬度 0.8–55.8°）。境外坐标会原样保留，跟 GCJ-02 规范一致。
 
-Because the conversion is byte-level rather than going through a high-level FIT library, **all unknown / private Garmin fields are preserved exactly**. Higher-level libraries silently drop fields they don't recognize, which produced corrupt output in earlier prototypes of this tool.
+## 工作原理（技术细节）
 
-## Tests
+FIT 二进制格式把坐标存成 32 位有符号整数（"semicircles"，1 semicircle = 180/2³¹ 度），位于"数据记录"中，每条数据记录的字段布局由前面的"定义记录"指定。本工具：
+
+1. 按 `local_message_type` 跟踪每条定义记录
+2. 在数据记录里查找 `global_message_num` 为 `record`（20）、`course_point`（32）或 `lap`（19）的
+3. 在这些记录里按 `field_definition_num` 定位 `position_lat` / `position_long` 字段
+4. 把 semicircle 整数转回度，应用迭代式 GCJ-02→WGS84 反向变换，再转回 semicircle 写回原字节位置
+5. 在文件末尾重新计算 CRC
+
+GCJ-02 正向变换没有解析逆，工具用迭代不动点法求逆，5 次迭代后误差 < 1e-9 度（远小于 FIT semicircle 精度 ~1e-7 度）。
+
+之所以走字节级修改而不是用高层 FIT 库，是因为**这种做法能完美保留所有未知字段**——包括 Garmin 写入的私有字段。早期用高层库（`fit_tool`）做的原型在重建文件时会丢字段，还会把 UTF-8 中文路点名搞坏。字节级方案不会有这些问题。
+
+## 测试
 
 ```bash
 ~/gpxfit-env/bin/python -m pytest tests/
 ```
 
-The test suite uses real Connect-edited and pristine FIT files as fixtures (paths configurable via `pytest.ini`).
+测试套件用真实的 Connect 编辑过的 FIT 和原始 GPX 作为 fixture（路径写在 `tests/test_roundtrip.py` 顶部）。
 
-## Roadmap
+## 路线图
 
-This is **M1** of a multi-stage plan. Future milestones (separate releases):
+这是分阶段交付计划的 **M1**。后续阶段（独立发布）：
 
-- **M2** — Native macOS GUI app: load a FIT, render trackpoints + course points on an OpenTopoMap layer for visual inspection (Connect-edited files visibly offset; pristine files aligned). Lets you eyeball before converting.
-- **M3** — In-app CoursePoint editing (rename, batch-delete, retype). Replaces the editing role currently filled by the unsafe Connect GUI.
-- **M4** — One-click "send to watch" via macOS USB volume detection.
+- **M2** — macOS 原生 GUI 应用：加载 FIT，在 OpenTopoMap 等高线地形图上叠加显示轨迹和路点，便于肉眼判断坐标系（编辑过的明显偏移、未编辑的对齐）
+- **M3** — GUI 内编辑路点：改名、批量删除、改类型。替代 Connect 中国区编辑步骤
+- **M4** — 一键发送到手表
 
-## License
+## 许可证
 
-MIT — see [LICENSE](LICENSE).
+MIT — 见 [LICENSE](LICENSE)。
