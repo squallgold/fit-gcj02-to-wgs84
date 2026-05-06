@@ -1,0 +1,4 @@
+# Runtime: stdlib only — no dependencies.
+# Test-time: fit_tool is used by tests/test_roundtrip.py to parse output back
+#            and confirm the file remains valid FIT after conversion.
+fit_tool
